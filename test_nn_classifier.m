@@ -1,98 +1,75 @@
-% Preview preprocessing pipeline before training
-cfg = config;
-[files, labels] = load_dataset(cfg);
+% Train/test the nearest-neighbour pedestrian classifier using the same
+% preprocessing + HOG pipeline and dataset split as the kNN and SVM script.
 
+clear; clc; close all;
 
-% mumbo jumbo to get a random sample of images used for testing
-rng(cfg.seed); % repeatable sampling
-posIdx = find(labels == 1);
-negIdx = find(labels == -1);
+cfg = config();
+testRatio = 0.3; % 70/30 split like SVM evaluation
 
-numPos = min(10, numel(posIdx));
-numNeg = min(10, numel(negIdx));
-
-posSample = posIdx(randperm(numel(posIdx), numPos));
-negSample = negIdx(randperm(numel(negIdx), numNeg));
-sampleIdx = [posSample(:); negSample(:)];
-
-% put test samples in a list and remove from orignal files list
-testSample = [files(posSample), files(negSample)];
-testSample = testSample(:);
-
-[~, idxToRemove] = ismember(testSample, files);
-testlabels = labels(idxToRemove(idxToRemove > 0));
-
-files(idxToRemove(idxToRemove > 0)) = [];
-labels(idxToRemove(idxToRemove > 0)) = [];
-
-
-% pre process all images and hog it
-trainImages = [];
-testImages = [];
-for i = 1:numel(files)
-    Iin = imread(files{i});
-    Iout = preprocess_image(Iin, cfg);
-    hog = hog_feature_vector(Iout);
-    trainImages = [trainImages; hog];
+fprintf('Loading dataset...\n');
+[fileList, labels] = load_dataset(cfg);
+if isempty(fileList)
+    error('test_nn_classifier:EmptyDataset', 'No samples found in crops directories.');
 end
 
-modelNN = NNtraining(trainImages, labels);
+fprintf('Extracting HOG features from %d samples...\n', numel(fileList));
+features = build_feature_matrix(fileList, cfg);
 
-for i = 1:numel(testSample)
-    Iin = imread(testSample{i});
-    Iout = preprocess_image(Iin, cfg);
-    hog = hog_feature_vector(Iout);
-    testImages = [testImages; hog];
+fprintf('Splitting dataset (%.0f%% train / %.0f%% test)...\n', ...
+    (1 - testRatio) * 100, testRatio * 100);
+[trainIdx, testIdx] = split_dataset(labels, testRatio, cfg.seed);
+
+trainImages = features(trainIdx, :);
+trainLabels = labels(trainIdx);
+testImages  = features(testIdx, :);
+testLabels  = labels(testIdx);
+
+modelNN = NNtraining(trainImages, trainLabels);
+
+% Predict labels for test set
+predictedLabels = zeros(sum(testIdx), 1);
+for i = 1:size(testImages, 1)
+    predictedLabels(i) = NN_classifier(testImages(i, :), modelNN);
 end
 
-% test sample images with trained images
-for i = 1:size(testImages,1)
-    testnumber = testImages(i,:);
-    classificationResult(i,1) = NN_classifier(testnumber, modelNN);
+accuracy = mean(predictedLabels == testLabels);
+fprintf('1-NN accuracy: %.2f%%\n', accuracy * 100);
 
-end
+% Metrics matching the SVM script
+cm = confusionmat(testLabels, predictedLabels, 'Order', [-1 1]);
+TN = cm(1,1); FP = cm(1,2);
+FN = cm(2,1); TP = cm(2,2);
+precision = TP / max(1, (TP + FP));
+recall = TP / max(1, (TP + FN));
+f1 = 2 * precision * recall / max(eps, precision + recall);
 
-% evaluate results
+fprintf('Precision: %.2f | Recall: %.2f | F1: %.2f\n', precision, recall, f1);
 
-% Finally we compared the predicted classification from our mahcine
-% learning algorithm against the real labelling of the testing image
-comparison = (testlabels==classificationResult);
-
-%Accuracy is the most common metric. It is defiend as the numebr of
-%correctly classified samples/ the total number of tested samples
-Accuracy = sum(comparison)/length(comparison)
-
-confMatrix = confusionmat(testlabels, classificationResult);
-
-% Display the confusion matrix
-disp('Confusion Matrix:');
-disp(confMatrix);
-
-% Create a heatmap with custom labels
 figure;
-h = heatmap(confMatrix);
+confusionchart(cm, {'Non-Pedestrian','Pedestrian'});
+title('NN Confusion Matrix (k=1)');
 
-% Set the axis labels to your class labels
-h.XLabel = 'Predicted Class';
-h.YLabel = 'True Class';
-h.Title = 'Confusion Matrix';
+results = struct('cfg', cfg, 'modelNN', modelNN, ...
+    'trainIdx', trainIdx, 'testIdx', testIdx, ...
+    'trainImages', trainImages, 'trainLabels', trainLabels, ...
+    'testImages', testImages, 'testLabels', testLabels, ...
+    'predictedLabels', predictedLabels, ...
+    'confusionMatrix', cm, ...
+    'metrics', struct('accuracy', accuracy, 'precision', precision, 'recall', recall, 'f1', f1));
 
-% Change the displayed tick labels to 0 and 1
-h.XDisplayLabels = {'Non Pedestrian','Pedestrian'};
-h.YDisplayLabels = {'Non Pedestrian','Pedestrian'};
+save('nn_results.mat', 'results', 'features', 'labels', 'fileList');
+fprintf('Saved evaluation details to nn_results.mat (features + results).\n');
 
-TP = confMatrix(1,1);  % True Positives
-TN = confMatrix(2,2);  % True Negatives
-FP = confMatrix(1,2);  % False Positives
-FN = confMatrix(2,1);  % False Negatives
+%% ------------------------------------------------------------------------
+function features = build_feature_matrix(files, cfg)
+numSamples = numel(files);
+sampleFeat = extract_hog(preprocess_image(imread(files{1}), cfg), cfg);
+featLen = numel(sampleFeat);
+features = zeros(numSamples, featLen, 'double');
+features(1, :) = sampleFeat;
 
-% Precision
-precision = TP / (TP + FP);
-% Recall (Sensitivity)
-recall = TP / (TP + FN);
-% F1-Score
-F1 = 2 * (precision * recall) / (precision + recall);
-
-fprintf('Precision: %.2f\n', precision);
-fprintf('Recall: %.2f\n', recall);
-fprintf('F1-Score: %.2f\n', F1);
+for i = 2:numSamples
+    Iproc = preprocess_image(imread(files{i}), cfg);
+    features(i, :) = extract_hog(Iproc, cfg);
+end
+end

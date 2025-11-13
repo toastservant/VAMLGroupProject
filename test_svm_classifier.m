@@ -1,4 +1,3 @@
-%% test_svm_classifier.m
 % Train/evaluate an SVM pedestrian classifier using preprocess_image + HOG features.
 
 clear; clc; close all;
