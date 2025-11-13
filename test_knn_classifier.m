@@ -10,52 +10,20 @@ fprintf('Loading dataset...\n');
 cfg = config();
 [X, Y] = load_dataset(cfg);
 
+fprintf('Extracting HOG features (Prac 5 pipeline)...\n');
+features = build_feature_matrix(X, cfg);
+
 % Keep a copy of the original file paths or image data for visualization later
 originalFiles = X;
 
 fprintf('Splitting dataset (70/30)...\n');
 % Split the dataset into 70% training and 30% testing
-[trainIdx, testIdx] = split_dataset(Y, 0.3, 42);
-
-%% Extract gradient-based features (HOG-like features)
-% Each image is converted to grayscale, resized, and its gradients are used
-% to form a simple descriptor similar to HOG. This does not require any toolbox.
-
-cellSize = [8 8];
-features = [];
-
-for i = 1:length(X)
-    img = X{i};
-
-    % Read image if X contains file paths instead of image data
-    if ischar(img) || isstring(img)
-        img = imread(img);
-    end
-
-    % Convert to grayscale if the image is in color
-    if size(img,3) > 1
-        img = rgb2gray(img);
-    end
-
-    % Resize to a standard pedestrian window size
-    img = imresize(img, [128 64]);
-
-    % Compute simple gradient-based magnitude feature
-    Gx = imfilter(double(img), [-1 0 1], 'replicate');
-    Gy = imfilter(double(img), [-1; 0; 1], 'replicate');
-    mag = sqrt(Gx.^2 + Gy.^2);
-    feat = imresize(mag, [16 8]);
-    feat = feat(:)'; % Flatten into a row vector
-
-    features = [features; feat];
-end
-
-X = double(features); % Convert to numeric matrix for training
+[trainIdx, testIdx] = split_dataset(Y, 0.3, cfg.seed);
 
 %% Split features into training and testing sets
-XTrain = X(trainIdx, :);
+XTrain = features(trainIdx, :);
 YTrain = Y(trainIdx);
-XTest  = X(testIdx, :);
+XTest  = features(testIdx, :);
 YTest  = Y(testIdx);
 
 %% Train and evaluate K-NN classifier for multiple K values
@@ -130,3 +98,18 @@ for i = 1:numShow
     title(sprintf('Pred: %d | True: %d', YPred(pickInTest(i)), YTest(pickInTest(i))));
 end
 sgtitle('Sample Test Predictions');
+
+%% ------------------------------------------------------------------------
+function feats = build_feature_matrix(filePaths, cfg)
+numSamples = numel(filePaths);
+sampleImg = preprocess_image(imread(filePaths{1}), cfg);
+hogSample = extract_hog(sampleImg, cfg);
+featLen = numel(hogSample);
+feats = zeros(numSamples, featLen, 'double');
+feats(1, :) = hogSample;
+
+for idx = 2:numSamples
+    Iproc = preprocess_image(imread(filePaths{idx}), cfg);
+    feats(idx, :) = extract_hog(Iproc, cfg);
+end
+end
