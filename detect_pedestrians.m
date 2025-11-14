@@ -1,22 +1,29 @@
-% Multi-scale pedestrian detector demo using preprocess_image-style pipeline + HOG features.
+% Multi-scale pedestrian detemaximctor demo using preprocess_image-style pipeline + HOG features.
 
 clear; clc; close all;
 
 cfg = config();
 modelFile = 'svm_results.mat';
 imageDir = fullfile(pwd, 'images');
+gtFile = fullfile(pwd, 'test.dataset');
+drawGT = true; % overlay red boxes from test.dataset if available
 params.baseStride = [24 24];        % default stride before scale adjustments
-params.scoreThreshold = 0.95;        % minimum score after penalties
-params.nmsThreshold = 0.3;          % IoU threshold for non-max suppression
-params.aspectTolerance = 0.25;      % tighter aspect ratio (reject trees/poles)
-params.gradientThreshold = 0.05;    % base gradient energy threshold
-params.scales = [1.35 1.15 1.0 0.85 0.7 0.55 0.45 0.35 0.28];
-params.scalePenalties = [0.35 0.2 0.05 0 0 0 0.08 0.12 0.18];
-params.scaleStrideFactors = [1 1 1 1.1 1.3 1.6 1.9 2.2 2.6];
-params.scaleGradAdjust = [0 0 0 0 -0.01 -0.02 -0.02 -0.03 -0.03];
+params.scoreThreshold = 0.7;        % minimum score after penalties (tuned for far recall)
+params.nmsThreshold = 0.15;         % tighter IoU threshold for non-max suppression
+params.aspectTolerance = 0.2;       % tighter aspect ratio (reject trees/poles)
+params.gradientThreshold = 0.05;  % base gradient energy threshold
+params.scales = [1.35 1.15 1.0 0.9 0.75 0.6 0.5 0.4 0.32 0.24 0.18];
+params.scalePenalties = [0.4 0.25 0.05 0 0 0.02 0.05 0.08 0.08 0.1 0.1];
+params.scaleStrideFactors = [1 1 1 1.1 1.3 1.6 1.9 2.2 2.6 3.0 3.4];
+params.scaleGradAdjust = [0 0 0 0 -0.01 -0.015 -0.02 -0.025 -0.035 -0.04 -0.05];
 params.maxLongSide = 900;
 params.maxDetectionsToShow = 25;
-params.nestedContainment = 0.7;                     % drop boxes fully inside stronger ones
+params.nestedContainment = 0.85;                    % drop boxes fully inside stronger ones
+params.lowScoreCutoff = 0.75;                       % if score below this AND box is skinny -> drop
+params.minWidthForLowScore = 50;                    % width threshold (pixels in original coordinates)
+params.minAspectForLowScore = 0.35;                 % drop tall skinny boxes unless high score
+params.maxAspectForLowScore = 0.9;                  % drop extra-wide boxes unless high score
+params.highScoreOverride = 0.9;                     % skip aspect penalties when score >= this
 
 assert(numel(params.scales) == numel(params.scalePenalties), ...
     'scales and scalePenalties must have same length.');
@@ -46,6 +53,15 @@ IprocFull = preprocess_full_image(Iorig, cfg);
 [bboxes, scores] = suppress_nested_boxes(bboxes, scores, params.nestedContainment);
 [bboxes, scores] = limit_detections(bboxes, scores, params.maxDetectionsToShow);
 
+gtBoxes = [];
+if drawGT && exist(gtFile, 'file')
+    gtBoxes = lookup_ground_truth(gtFile, imgPath);
+    if scaleDown < 1 && ~isempty(gtBoxes)
+        gtBoxes(:, [1 3]) = gtBoxes(:, [1 3]) * scaleDown;
+        gtBoxes(:, [2 4]) = gtBoxes(:, [2 4]) * scaleDown;
+    end
+end
+
 figure('Name', sprintf('Detections: %s', strip_path(imgPath)), 'NumberTitle', 'off');
 imshow(Iorig);
 title(sprintf('%s | %d detections', strip_path(imgPath), size(bboxes, 1)), 'Interpreter', 'none');
@@ -54,6 +70,11 @@ for i = 1:size(bboxes, 1)
     rectangle('Position', bboxes(i, :), 'EdgeColor', 'g', 'LineWidth', 2);
     text(bboxes(i,1), bboxes(i,2)-5, sprintf('%.2f', scores(i)), 'Color', 'g', ...
         'FontSize', 8, 'FontWeight', 'bold', 'BackgroundColor', 'k');
+end
+if ~isempty(gtBoxes)
+    for j = 1:size(gtBoxes, 1)
+        rectangle('Position', gtBoxes(j, :), 'EdgeColor', 'r', 'LineWidth', 1.5, 'LineStyle', '--');
+    end
 end
 hold off;
 
@@ -111,7 +132,7 @@ for idx = 1:numel(params.scales)
     stride = max(4, round(params.baseStride .* params.scaleStrideFactors(idx)));
     gradThresh = max(0, params.gradientThreshold + params.scaleGradAdjust(idx));
     [b, sc] = sliding_window_detect(Iscaled, cfg, model, stride, ...
-        params.scoreThreshold, gradThresh, penalty);
+        params.scoreThreshold, gradThresh, penalty, scale, params);
     if isempty(b)
         continue;
     end
@@ -122,7 +143,7 @@ for idx = 1:numel(params.scales)
 end
 end
 
-function [bboxes, scores] = sliding_window_detect(I, cfg, model, stride, scoreThresh, gradThresh, penalty)
+function [bboxes, scores] = sliding_window_detect(I, cfg, model, stride, scoreThresh, gradThresh, penalty, scale, params)
 winSize = cfg.targetSize;
 winH = winSize(1);
 winW = winSize(2);
@@ -146,6 +167,22 @@ for r = rows
         feat = extract_hog(patch, cfg);
         [label, rawScore] = predict(model, feat);
         score = positive_score(rawScore, model) - penalty;
+        if label == 1
+            boxWidth = winW / scale;
+            boxHeight = winH / scale;
+            aspect = boxWidth / max(1, boxHeight);
+            if score < params.lowScoreCutoff
+                if boxWidth < params.minWidthForLowScore
+                    continue;
+                end
+                if score < params.highScoreOverride
+                    if aspect < params.minAspectForLowScore || aspect > params.maxAspectForLowScore
+                        continue;
+                    end
+                end
+            end
+        end
+
         if label == 1 && score >= scoreThresh
             bboxes(end+1, :) = [c, r, winW, winH]; %#ok<AGROW>
             scores(end+1, 1) = score; %#ok<AGROW>
@@ -247,6 +284,65 @@ end
 function name = strip_path(pathStr)
 [~, base, ext] = fileparts(pathStr);
 name = [base ext];
+end
+
+function boxes = lookup_ground_truth(gtFile, imgPath)
+persistent gtMap
+if isempty(gtMap)
+    gtMap = parse_ground_truth(gtFile);
+end
+rel = relative_path(imgPath);
+if isKey(gtMap, rel)
+    boxes = gtMap(rel);
+else
+    boxes = [];
+end
+end
+
+function gtMap = parse_ground_truth(gtFile)
+gtMap = containers.Map('KeyType', 'char', 'ValueType', 'any');
+fid = fopen(gtFile, 'r');
+if fid == -1
+    warning('detect_pedestrians:MissingGT', 'Could not open %s for ground-truth overlay.', gtFile);
+    return;
+end
+cleanup = onCleanup(@() fclose(fid));
+
+header = fgetl(fid); %#ok<NASGU>
+countLine = fgetl(fid); %#ok<NASGU>
+while ~feof(fid)
+    line = strtrim(fgetl(fid));
+    if isempty(line)
+        continue;
+    end
+    parts = strsplit(line);
+    imgRel = parts{1};
+    objCount = str2double(parts{2});
+    nums = str2double(parts(3:end));
+    boxes = zeros(objCount, 4);
+    for i = 1:objCount
+        idx = (i-1)*5 + 1;
+        cx = nums(idx);
+        cy = nums(idx+1);
+        w = nums(idx+2);
+        h = nums(idx+3);
+        % dataset stores center coordinates; convert to top-left [x y w h]
+        x = cx - w/2;
+        y = cy - h/2;
+        boxes(i, :) = [x y w h];
+    end
+    gtMap(imgRel) = boxes;
+end
+end
+
+function rel = relative_path(absPath)
+cwd = pwd;
+if startsWith(absPath, cwd)
+    rel = erase(absPath, [cwd filesep]);
+else
+    rel = absPath;
+end
+rel = strrep(rel, '\\', '/');
 end
 
 function [bboxes, scores] = suppress_nested_boxes(bboxes, scores, overlapFrac)

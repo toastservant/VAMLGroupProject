@@ -4,7 +4,9 @@ clear; clc; close all;
 
 cfg = config();
 testRatio = 0.3;
-svmOpts = struct('kernel', 'linear', 'boxConstraint', 1, 'kernelScale', 'auto');
+% Poly kernel performed best in comparison (compare_svm_kernels)
+svmOpts = struct('kernel', 'polynomial', 'polynomialOrder', 2, ...
+    'boxConstraint', 1, 'kernelScale', 'auto');
 rng(cfg.seed);
 
 fprintf('Loading dataset...\n');
